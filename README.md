@@ -1,4 +1,4 @@
-# VVC-MOBILE-AGENT-CORE
+# VVC-ACIA
 
 Agente Android local de The Van Cartier Authority. La aplicación ejecuta inferencia LiteRT offline con modelos empaquetados y dispone de una capa modular para instalar versiones de modelos sin recompilar el APK.
 
