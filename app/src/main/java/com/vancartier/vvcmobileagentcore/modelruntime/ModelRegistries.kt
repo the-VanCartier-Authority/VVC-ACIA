@@ -84,5 +84,5 @@ private fun ModelManifest.toJson(): JSONObject = JSONObject().apply {
         put("inputContract", model.inputContract); put("outputContract", model.outputContract)
         put("capabilities", JSONArray(model.capabilities.toList())); put("minAppVersion", model.minAppVersion)
         put("minMemoryMb", model.minMemoryMb); put("enabled", model.enabled)
-    } })
+    } )))
 }
