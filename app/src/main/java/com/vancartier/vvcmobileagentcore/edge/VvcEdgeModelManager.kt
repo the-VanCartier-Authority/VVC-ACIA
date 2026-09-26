@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.res.AssetManager
 import android.graphics.Bitmap
 import com.vancartier.vvcmobileagentcore.notification.VvcNotificationScheduler
+import com.vancartier.vvcmobileagentcore.modelruntime.ModelRuntime
 import com.vancartier.vvcmobileagentcore.security.VvcHashCalculator
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
@@ -42,6 +43,8 @@ class VvcEdgeModelManager(
     private val rejectedModels = ConcurrentHashMap<String, String>()
     private val modelLoadingMutex = Mutex()
     private val availableModelPaths = ConcurrentHashMap<String, String>() // normalized -> asset path
+    private val availableModelFiles = ConcurrentHashMap<String, File>() // normalized -> downloaded artifact
+    private val modelRuntime = ModelRuntime(applicationContext)
     private val isInitialized = ConcurrentHashMap<String, Boolean>() // Track which models are loaded
 
     val initialization: Deferred<Unit> = scope.async {
@@ -140,6 +143,7 @@ class VvcEdgeModelManager(
         rejectedModels.clear()
         availableModelPaths.clear()
         isInitialized.clear()
+        availableModelFiles.clear()
         scope.cancel()
     }
 
@@ -154,6 +158,15 @@ class VvcEdgeModelManager(
             if (normalizedName.endsWith(".tflite") || normalizedName.endsWith(".lite") || normalizedName.endsWith(".litert")) {
                 // Verify but don't load yet
                 verifyModelIntegrity(assetPath, normalizedName)
+            }
+        }
+        // Downloaded artifacts are validated by ModelRuntime and take precedence over assets.
+        modelRuntime.activeArtifacts().forEach { (modelId, file) ->
+            val normalized = modelId.lowercase(Locale.US)
+            if (file.isFile) {
+                availableModelFiles[normalized] = file
+                modelNames[normalized] = "files/models/${file.name}"
+                verifiedHashes["files/models/${file.name}"] = VvcHashCalculator.calculateFileSha256(file)
             }
         }
     }
@@ -198,6 +211,7 @@ class VvcEdgeModelManager(
             return
         }
 
+        availableModelFiles[modelKey]?.let { loadModelIntoMemory(modelKey, it); return }
         val assetPath = availableModelPaths[modelKey] ?: return
         loadModelIntoMemory(modelKey, assetPath)
     }
@@ -206,18 +220,23 @@ class VvcEdgeModelManager(
      * Load a single model into memory.
      */
     private fun loadModelIntoMemory(normalizedName: String, assetPath: String) {
+        loadModelBuffer(normalizedName, loadMappedAsset(assetPath), assetPath)
+    }
+    private fun loadModelIntoMemory(normalizedName: String, file: File) {
+        loadModelBuffer(normalizedName, file.inputStream().use { it.channel.map(FileChannel.MapMode.READ_ONLY, 0, file.length()) }, file.name)
+    }
+    private fun loadModelBuffer(normalizedName: String, modelBuffer: MappedByteBuffer, displayName: String) {
         try {
-            val modelBuffer = loadMappedAsset(assetPath)
             val options = Interpreter.Options().apply {
                 setNumThreads(DEFAULT_THREAD_COUNT)
             }
             interpreters[normalizedName] = Interpreter(modelBuffer, options)
             isInitialized[normalizedName] = true
         } catch (e: Exception) {
-            rejectedModels[assetPath] = "Error al cargar: ${e.message}"
+            rejectedModels[displayName] = "Error al cargar: ${e.message}"
             notificationScheduler.scheduleModelAnomalyAlert(
                 title = "Error al cargar modelo VVC",
-                message = "No se pudo cargar $assetPath: ${e.message}"
+                message = "No se pudo cargar $displayName: ${e.message}"
             )
         }
     }
@@ -245,7 +264,8 @@ class VvcEdgeModelManager(
     }
 
     private fun findAvailableModelKey(markers: Array<String>): String? {
-        return availableModelPaths.keys.firstOrNull { key -> markers.any { marker -> key.contains(marker) } }
+        return availableModelFiles.keys.firstOrNull { key -> markers.any { marker -> key.contains(marker) } }
+            ?: availableModelPaths.keys.firstOrNull { key -> markers.any { marker -> key.contains(marker) } }
     }
 
     private fun runSingleInputFloatInference(interpreter: Interpreter, sourceValues: FloatArray): FloatArray {

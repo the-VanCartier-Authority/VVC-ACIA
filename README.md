@@ -1,72 +1,68 @@
 # VVC-MOBILE-AGENT-CORE
 
-Cyberpunk-styled Local Android Agent. Driven by The Van Cartier Authority.
+Agente Android local de The Van Cartier Authority. La aplicación ejecuta inferencia LiteRT offline con modelos empaquetados y dispone de una capa modular para instalar versiones de modelos sin recompilar el APK.
 
-## Rama operativa
+## Arquitectura modular
 
-`vvc/gradle-wrapper-ci`
+El paquete `app/src/main/java/com/vancartier/vvcmobileagentcore/modelruntime/` contiene:
 
-## Núcleo offline
+- `ModelContracts.kt`: descriptores, manifiestos, eventos de progreso y contrato `LlmProvider`.
+- `ModelStore.kt`: almacenamiento privado versionado, punteros activos y activación atómica mediante archivo temporal y rename.
+- `ModelRuntime.kt`: coordinación de registro, validación, instalación, activación y rollback manual.
+- `ModelRegistries.kt`: catálogo local JSON, catálogo HTTPS y catálogo firmado con Ed25519.
+- `ModelDownloader.kt`: descarga HTTPS a `.partial`, validación de tamaño y SHA-256 antes de instalar.
+- `ModelUpdateWorker.kt`: sincronización persistente con WorkManager y reintentos.
 
-La app mantiene inferencia local mediante LiteRT y carga modelos desde:
+El almacenamiento de modelos descargados es privado a la aplicación:
 
 ```text
-app/src/main/assets/models/
+files/models/
+├── versions/<model-id>/<version>.artifact
+├── active/<model-id>                 # versión activa
+├── temp/<model-id>-<version>.partial
+└── catalog.json
 ```
 
-Los binarios `.tflite` no se versionan para evitar errores de PR con archivos binarios; se regeneran localmente. Cada modelo `.tflite` debe tener un archivo lateral `.sha256` generado por:
+Flujo seguro:
+
+```text
+Catálogo → HTTPS → .partial → tamaño/SHA-256 → instalación → puntero atómico → lazy loading
+```
+
+`VvcEdgeModelManager` valida los assets mediante sus archivos `.sha256`, y prioriza un artefacto descargado activo que coincida con la capacidad solicitada. Si no existe uno válido, utiliza los modelos de `app/src/main/assets/models/` como fallback offline.
+
+## Registro remoto opcional
+
+No se configura ningún endpoint remoto por defecto. Para sincronizar de forma explícita:
+
+```kotlin
+ModelRuntime(context).synchronize(HttpModelRegistry("https://example.invalid/models.json"))
+```
+
+El endpoint debe ser HTTPS. Para actualizaciones periódicas se puede usar `ModelUpdateScheduler.schedule(context, "https://example.invalid/models.json")`. `SignedHttpModelRegistry` permite validar un sobre `{ "payload": "...", "signature": "..." }` con una clave pública Ed25519 antes de aceptar el manifiesto. Las versiones instaladas se conservan; `ModelRuntime.rollback(id, descriptor)` puede reactivar una versión anterior ya instalada.
+
+## Proveedores LLM
+
+`LlmProvider` es una abstracción para que un proveedor local o remoto pueda incorporarse sin acoplar el resto de la app a una implementación concreta. `UnsupportedLocalLlmProvider` falla explícitamente.
+
+**LiteRT-LM no está implementado en esta fase.** El proyecto usa LiteRT Interpreter para los clasificadores de audio, imagen y texto existentes, pero todavía no incluye runtime LiteRT-LM, tokenizer, conversación ni streaming LLM. No se declaran resultados simulados ni un proveedor remoto inexistente.
+
+## Modelos actuales y seguridad
+
+Los assets existentes viven en `app/src/main/assets/models/`. Cada modelo debe tener su sidecar `.sha256`. El script de descarga es `python3 tools/download_edge_models.py`. La app no carga un modelo empaquetado si falta el sidecar o el hash no coincide. Las anomalías de integridad y las salidas de baja confianza generan notificaciones locales.
+
+## Compilación y validación
+
+Requisitos: Java 17, Android SDK con API 35 y Gradle Wrapper 8.13.
 
 ```bash
-python3 tools/download_edge_models.py
+export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+./gradlew :app:assembleDebug
+./gradlew :app:test
 ```
 
-El script descarga artefactos TFLite de fuentes oficiales de TensorFlow/Google para las habilidades locales:
+El APK debug se genera en `app/build/outputs/apk/debug/app-debug.apk`. El workflow `.github/workflows/android-build.yml` compila `assembleDebug` en CI. La validación de descarga, firma y rollback requiere un catálogo y artefactos de prueba; no se activan por defecto en producción.
 
-- `audio_scribe_yamnet_classifier.tflite`: clasificación de audio base para Audio Scribe.
-- `mobile_actions_text_classifier.tflite`: clasificación de texto base para Mobile Actions.
-- `ask_image_mobilenet_quant_classifier.tflite`: clasificación visual cuantizada para Ask Image.
+## Fase MODEL RUNTIME MODULARITY — 1
 
-> Los archivos `.sha256` y `vvc_edge_models_manifest.json` sí se versionan como contrato de integridad; los `.tflite` se descargan con el script anterior dentro de `app/src/main/assets/models/`.
-
-La variante MobileNetV4 de referencia queda disponible como descarga opcional del script con `--include-optional`, pero no se activa por defecto porque la conversión pública localizada es Float16 y no INT8. Para producción estricta INT8, sustituir el archivo Ask Image por el artefacto corporativo aprobado y generar su `.sha256`.
-
-
-
-## Gradle Wrapper y CI
-
-El proyecto versiona Gradle Wrapper para evitar depender de instalaciones globales de Gradle. La versión fijada es Gradle 8.13, compatible con Android Gradle Plugin 8.12.1.
-
-Comando oficial de compilación local y CI:
-
-```bash
-./gradlew assembleDebug
-```
-
-El workflow `.github/workflows/android-build.yml` ejecuta ese mismo comando y publica los APK generados desde `app/build/outputs/apk/debug/*.apk` como artifact.
-
-## Compilación debug en Termux
-
-En Termux/Android, el Android Gradle Plugin puede intentar ejecutar el `aapt2` Linux descargado desde Maven. Ese binario no es ejecutable dentro de Termux/Android y falla durante `:app:processDebugResources` con mensajes como `Syntax error: ")" unexpected` o `AAPT2 ... Daemon startup failed`.
-
-Usa el helper versionado para forzar el `aapt2` instalado dentro del Android SDK local:
-
-```bash
-tools/vvc_build_debug_termux.sh
-```
-
-El helper realiza estas acciones:
-
-- Detecta el SDK desde `ANDROID_HOME`, `ANDROID_SDK_ROOT` o `~/android-sdk`.
-- Regenera `local.properties` con `sdk.dir=...`.
-- Verifica que `local.properties` siga protegido por `.gitignore`.
-- Busca el `aapt2` de `build-tools` y compila con `-Pandroid.aapt2FromMavenOverride=...`.
-
-Si ya tienes un alias llamado `vvc_build_debug`, apúntalo a este script para evitar volver a ejecutar el `aapt2` Linux de Maven. El helper usa exclusivamente `./gradlew`, no una instalación global de Gradle.
-
-## Seguridad local
-
-- No se usa `js_eval`.
-- No se usa `child_process`.
-- No se usa JNI libre propio.
-- Los modelos se validan con SHA-256 antes de cargarse en memoria.
-- Las anomalías de baja confianza o integridad disparan notificaciones locales Android.
+Esta fase implementa modularidad de modelos sin recompilar, fallback offline, descarga persistente, validación criptográfica, activación atómica, conservación de versiones y rollback manual. Quedan fuera de alcance la implementación real de LiteRT-LM, un backend de modelos, credenciales de producción y rollback automático tras crash.
