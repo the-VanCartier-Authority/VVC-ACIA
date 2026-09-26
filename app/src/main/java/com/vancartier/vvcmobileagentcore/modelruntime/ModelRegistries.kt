@@ -32,6 +32,7 @@ data class SignedManifestEnvelope(val payload: String, val signature: String)
 
 class SignedHttpModelRegistry(private val endpoint: String, private val verifier: Ed25519ManifestVerifier) : ModelRegistry {
     override suspend fun fetch(): ModelManifest {
+        require(endpoint.startsWith("https://")) { "El registro firmado debe usar HTTPS" }
         val connection = URL(endpoint).openConnection() as HttpURLConnection
         connection.requestMethod = "GET"
         connection.connectTimeout = 15_000
@@ -75,14 +76,30 @@ private fun parseManifest(raw: String): ModelManifest {
     return ModelManifest(models, json.optString("generatedAt").takeIf { it.isNotBlank() })
 }
 
-private fun JSONArray?.toStringSet(): Set<String> = if (this == null) emptySet() else buildSet { for (i in 0 until length()) add(getString(i)) }
-private fun ModelManifest.toJson(): JSONObject = JSONObject().apply {
-    put("generatedAt", generatedAt ?: JSONObject.NULL)
-    put("models", JSONArray(models.map { model -> JSONObject().apply {
-        put("id", model.id); put("version", model.version); put("artifactUrl", model.artifactUrl)
-        put("sha256", model.sha256); put("sizeBytes", model.sizeBytes); put("runtime", model.runtime)
-        put("inputContract", model.inputContract); put("outputContract", model.outputContract)
-        put("capabilities", JSONArray(model.capabilities.toList())); put("minAppVersion", model.minAppVersion)
-        put("minMemoryMb", model.minMemoryMb); put("enabled", model.enabled)
-    } )))
+private fun JSONArray?.toStringSet(): Set<String> = if (this == null) emptySet() else buildSet {
+    for (i in 0 until length()) add(getString(i))
+}
+
+private fun ModelManifest.toJson(): JSONObject {
+    val array = JSONArray()
+    models.forEach { model ->
+        val item = JSONObject()
+        item.put("id", model.id)
+        item.put("version", model.version)
+        item.put("artifactUrl", model.artifactUrl)
+        item.put("sha256", model.sha256)
+        item.put("sizeBytes", model.sizeBytes)
+        item.put("runtime", model.runtime)
+        item.put("inputContract", model.inputContract)
+        item.put("outputContract", model.outputContract)
+        item.put("capabilities", JSONArray(model.capabilities.toList()))
+        item.put("minAppVersion", model.minAppVersion)
+        item.put("minMemoryMb", model.minMemoryMb)
+        item.put("enabled", model.enabled)
+        array.put(item)
+    }
+    return JSONObject().apply {
+        put("generatedAt", generatedAt ?: JSONObject.NULL)
+        put("models", array)
+    }
 }
